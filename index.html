@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Calves of Steel: Gus vs Jeffrey</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0a0f14; color: #e9f1f7; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #wrap { display:flex; flex-direction:column; height:100%; }
+    header { padding: 10px 16px; background: #121a22; box-shadow: 0 2px 8px rgba(0,0,0,.35); position: sticky; top: 0; z-index: 2; }
+    h1 { font-size: 18px; margin: 0; letter-spacing: .5px; }
+    #canvas { flex: 1 1 auto; display: block; width: 100%; height: calc(100% - 110px); background: linear-gradient(#1b2631,#0e141a); }
+    #hud { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 8px; padding: 8px 16px; background:#0e141a; border-top:1px solid #1c2733; }
+    .card { background:#101821; border:1px solid #1b2836; border-radius: 12px; padding:8px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.35); min-height:48px; }
+    .bar { height:8px; background:#0b1117; border:1px solid #213243; border-radius:999px; overflow:hidden; margin-top:6px; }
+    .fill { height:100%; width:0%; background: linear-gradient(90deg,#64d38a,#48a3ff); transition: width .15s linear; }
+    .muted { color:#a9bac7; font-size: 12px; }
+    #controls { padding: 8px 16px 16px; background:#0e141a; border-top:1px solid #1c2733; }
+    kbd { background:#101821; border:1px solid #1b2836; border-bottom-width:2px; border-radius:6px; padding:2px 6px; font-weight:600; }
+    #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; background:#0c131a; border:1px solid #1c2a3a; padding:10px 14px; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.45); display:none; z-index: 5; }
+    a { color:#78c2ff; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <header>
+      <h1>Calves of Steel: Gus vs Jeffrey — 50km Trail Showdown</h1>
+    </header>
+
+    <canvas id="canvas" width="1280" height="640" aria-label="Game canvas"></canvas>
+
+    <div id="hud">
+      <div class="card"><div><strong>Distance</strong> <span class="muted" id="distance">0.00 km</span></div></div>
+      <div class="card"><div><strong>Time</strong> <span class="muted" id="time">00:00</span></div></div>
+      <div class="card"><div><strong>Heart Rate</strong> <span class="muted" id="hr">40 bpm</span><div class="bar"><div id="hrFill" class="fill"></div></div></div></div>
+      <div class="card"><div><strong>Calf Power</strong> <span class="muted" id="calf">0%</span><div class="bar"><div id="calfFill" class="fill"></div></div></div></div>
+      <div class="card"><div><strong>Jeffrey</strong> <span class="muted" id="jeff">0.00 km</span></div></div>
+    </div>
+
+    <div id="controls" class="muted">
+      <strong>Controls:</strong>
+      <span>Move <kbd>←</kbd> <kbd>→</kbd> · Jump <kbd>↑</kbd> · Calf Smash (dash) <kbd>↓</kbd> · Pause <kbd>P</kbd> · Restart <kbd>R</kbd></span>
+      <br/>
+      Tip: Keep Gus' heart rate low. Use Calf Smash to break traps. Fix wires for bonuses when prompted (arrow keys only).
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+  // --- Simple canvas runner with comedic flair ---
+  (() => {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // Responsive sizing
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(900, window.innerWidth);
+      const h = Math.max(520, Math.floor(window.innerHeight * 0.66));
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    window.addEventListener('resize', resize, { passive: true });
+    resize();
+
+    // HUD elements
+    const ui = {
+      distance: document.getElementById('distance'),
+      time: document.getElementById('time'),
+      hr: document.getElementById('hr'),
+      hrFill: document.getElementById('hrFill'),
+      calf: document.getElementById('calf'),
+      calfFill: document.getElementById('calfFill'),
+      jeff: document.getElementById('jeff'),
+      toast: document.getElementById('toast'),
+    };
+
+    const showToast = (msg, ms=1500) => {
+      ui.toast.textContent = msg;
+      ui.toast.style.display = 'block';
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(()=> ui.toast.style.display='none', ms);
+    };
+
+    // Game constants
+    const KM_TARGET = 50;
+    const BASE_SPEED = 9.6; // km/h baseline speed (visualized)
+    const MAX_HR = 110; // Gus panics above this
+    const MIN_HR = 38;  // Gus' resting absurd HR
+
+    // World
+    let worldOffset = 0; // px scrolled
+    let pixelsPerKm = 1400; // scale
+
+    // Player (Gus)
+    const gus = {
+      x: 140, y: 0, vy: 0, onGround: false,
+      width: 36, height: 64,
+      speed: BASE_SPEED, // km/h
+      hr: 40,
+      calf: 0, // 0..100
+      alive: true,
+      finished: false,
+      timeMs: 0,
+    };
+
+    // Rival (Jeffrey)
+    const jeff = {
+      km: 0,
+      base: BASE_SPEED * 0.98,
+      chaos: 0.0, // added variability
+      dropTimer: 0,
+    };
+
+    // Obstacles & bonuses
+    const hazards = []; // {x,y,w,h,type}
+    const pickups = []; // {x,y,w,h,type}
+
+    const groundY = () => Math.floor(canvas.height / (window.devicePixelRatio||1)) - 80;
+
+    const keys = new Set();
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (["arrowleft","arrowright","arrowup","arrowdown"].includes(e.key.toLowerCase())) e.preventDefault();
+      if (k === 'p') paused = !paused;
+      if (k === 'r') reset();
+      keys.add(e.key);
+    });
+    window.addEventListener('keyup', (e) => keys.delete(e.key));
+
+    let lastTs = 0;
+    let paused = false;
+
+    function reset() {
+      worldOffset = 0;
+      gus.x = 140; gus.y = 0; gus.vy = 0; gus.onGround = false; gus.hr = 40; gus.calf = 0; gus.alive = true; gus.finished = false; gus.timeMs = 0; gus.speed = BASE_SPEED;
+      jeff.km = 0; jeff.dropTimer = 0; jeff.chaos = 0;
+      hazards.length = 0; pickups.length = 0;
+      for (let i=1;i<=200;i++) spawnChunk(i * 700 + 600); // pre-seed up to ~140 km px
+      showToast('Ready! Use arrow keys.');
+    }
+
+    function spawnChunk(xStart) {
+      // Random terrain features: rocks, mud (slows), wires (mini-task), smoothies (slip)
+      const gY = groundY();
+      const r = Math.random();
+      if (r < 0.55) {
+        // rock
+        hazards.push({ x: xStart, y: gY-24, w: 28, h: 24, type: 'rock' });
+      } else if (r < 0.78) {
+        // mud (slows briefly)
+        hazards.push({ x: xStart, y: gY-12, w: 80, h: 12, type: 'mud' });
+      } else if (r < 0.92) {
+        // kale smoothie (slippery)
+        hazards.push({ x: xStart, y: gY-8, w: 60, h: 8, type: 'smoothie' });
+      } else {
+        // exposed wire mini-fix (bonus)
+        hazards.push({ x: xStart, y: gY-6, w: 50, h: 6, type: 'wire' });
+      }
+
+      // pickups: coffee or bird or multitool
+      if (Math.random() < 0.35) {
+        pickups.push({ x: xStart + 140 + Math.random()*120, y: gY-40, w: 20, h: 20, type: Math.random()<0.5? 'coffee':'spite' });
+      }
+    }
+
+    function rectsCollide(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+    function update(dt) {
+      if (paused) return;
+      const dtSec = dt/1000;
+
+      // Controls (arrow keys only)
+      const left = keys.has('ArrowLeft');
+      const right = keys.has('ArrowRight');
+      const up = keys.has('ArrowUp');
+      const down = keys.has('ArrowDown');
+
+      // Horizontal speed adjustments
+      if (left) gus.speed -= 8 * dtSec; // km/h change
+      if (right) gus.speed += 10 * dtSec;
+      gus.speed = Math.max(6, Math.min(16, gus.speed));
+
+      // Heart rate dynamics (lower when easy, higher when fast / collisions). Natural drift toward MIN_HR
+      const targetHR = MIN_HR + (gus.speed - 8) * 5; // rises with speed
+      gus.hr += (targetHR - gus.hr) * 0.8 * dtSec; // ease toward target
+      gus.hr = Math.max(MIN_HR, Math.min(140, gus.hr));
+
+      // Calf power charges over time, faster when hearing Jeffrey taunts (simulated)
+      gus.calf += (10 + Math.sin(gus.timeMs*0.001)*2) * dtSec; // slow trickle
+      if (gus.calf > 100) gus.calf = 100;
+
+      // Jump
+      const gY = groundY();
+      if (up && gus.onGround) {
+        gus.vy = -520; // jump impulse
+        gus.onGround = false;
+      }
+      // Gravity
+      gus.vy += 1500 * dtSec;
+      gus.y += gus.vy * dtSec;
+      if (gus.y > gY - gus.height) { gus.y = gY - gus.height; gus.vy = 0; gus.onGround = true; }
+
+      // Calf Smash (dash forward, clear trap ahead)
+      if (down && gus.calf >= 35) {
+        const dashPx = 160;
+        worldOffset += dashPx;
+        gus.calf -= 35;
+        // clear closest hazard ahead
+        const ahead = hazards.find(h => h.x > worldOffset + gus.x + gus.width && h.x < worldOffset + gus.x + gus.width + 220);
+        if (ahead) hazards.splice(hazards.indexOf(ahead),1);
+        showToast('Calf Smash!');
+      }
+
+      // Advance world scroll by speed
+      const kmPerSec = gus.speed / 3600;
+      const pxPerSec = kmPerSec * pixelsPerKm;
+      worldOffset += pxPerSec * dtSec;
+
+      // Distance & time
+      gus.timeMs += dt;
+      const km = worldOffset / pixelsPerKm;
+
+      // Rival logic (Jeffrey) — slightly slower but bursts randomly, occasionally drops traps behind him
+      jeff.chaos += (Math.random()-0.5) * 0.2 * dtSec;
+      jeff.chaos = Math.max(-0.6, Math.min(0.8, jeff.chaos));
+      const jeffSpeed = Math.max(6, Math.min(15.5, jeff.base + jeff.chaos));
+      jeff.km += (jeffSpeed/3600) * dtSec;
+      jeff.dropTimer -= dtSec;
+      if (jeff.dropTimer <= 0 && Math.random() < 0.2) {
+        const dropX = jeff.km * pixelsPerKm + 300; // ahead of Jeffrey in world coords
+        hazards.push({ x: dropX, y: gY-8, w: 60, h: 8, type: 'smoothie' });
+        jeff.dropTimer = 2 + Math.random()*3;
+      }
+
+      // Collisions with hazards/pickups
+      const gusRect = { x: worldOffset + gus.x, y: gus.y, w: gus.width, h: gus.height };
+
+      for (let i=hazards.length-1; i>=0; i--) {
+        const h = hazards[i];
+        // only test if in vicinity
+        if (h.x < worldOffset + canvas.width + 200 && h.x + h.w > worldOffset - 200) {
+          const localRect = { x: h.x - worldOffset, y: h.y, w: h.w, h: h.h };
+          if (rectsCollide({x:gus.x,y:gus.y,w:gus.width,h:gus.height}, localRect)) {
+            if (h.type === 'rock') {
+              // stumble: lose speed, HR spikes; bump back slightly
+              gus.speed = Math.max(6, gus.speed - 2.5);
+              gus.hr += 6;
+              worldOffset -= 40;
+              showToast('Stubbed a toe on a rock!');
+            } else if (h.type === 'mud') {
+              gus.speed = Math.max(6, gus.speed - 3);
+              showToast('Sticky mud!');
+            } else if (h.type === 'smoothie') {
+              gus.vy = -380; // comedic slip hop
+              gus.hr += 4;
+              showToast('Jeffrey\'s kale smoothie! Slippery.');
+            } else if (h.type === 'wire') {
+              // electrician mini-fix: hold position for a short time window using arrows
+              performWireFix();
+              hazards.splice(i,1);
+              continue;
+            }
+            hazards.splice(i,1);
+          }
+        }
+      }
+
+      for (let i=pickups.length-1; i>=0; i--) {
+        const p = pickups[i];
+        if (p.x < worldOffset + canvas.width + 200 && p.x + p.w > worldOffset - 200) {
+          const localRect = { x: p.x - worldOffset, y: p.y, w: p.w, h: p.h };
+          if (rectsCollide({x:gus.x,y:gus.y,w:gus.width,h:gus.height}, localRect)) {
+            if (p.type === 'coffee') {
+              gus.hr = Math.max(MIN_HR, gus.hr - 8);
+              gus.speed = Math.min(16, gus.speed + 1.2);
+              showToast('Coffee boost! Heart rate drops.');
+            } else if (p.type === 'spite') {
+              gus.calf = Math.min(100, gus.calf + 22);
+              showToast('Spite fuel collected.');
+            }
+            pickups.splice(i,1);
+          }
+        }
+      }
+
+      // Failure/overstress condition
+      if (gus.hr > MAX_HR) {
+        gus.speed -= 5 * dtSec;
+        showToast('Too excited! Calm down.');
+      }
+
+      // Finish line
+      if (!gus.finished && km >= KM_TARGET) {
+        gus.finished = true; paused = true;
+        showToast('🏁 Gus wins! Total time: ' + formatTime(gus.timeMs));
+      }
+
+      // Update HUD
+      ui.distance.textContent = km.toFixed(2) + ' km';
+      ui.time.textContent = formatTime(gus.timeMs);
+      ui.hr.textContent = Math.round(gus.hr) + ' bpm';
+      ui.hrFill.style.width = Math.min(100, ((gus.hr - MIN_HR) / (MAX_HR - MIN_HR)) * 100) + '%';
+      ui.calf.textContent = Math.round(gus.calf) + '%';
+      ui.calfFill.style.width = gus.calf + '%';
+      ui.jeff.textContent = jeff.km.toFixed(2) + ' km';
+
+      // Dynamic spawning as world scrolls
+      while (hazards.length < 80) spawnChunk(worldOffset + canvas.width + Math.random()*600 + 400);
+      while (pickups.length < 20) spawnChunk(worldOffset + canvas.width + Math.random()*800 + 600);
+    }
+
+    function performWireFix() {
+      paused = true;
+      const sequence = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'];
+      let idx = 0;
+      const handler = (e) => {
+        if (e.key === sequence[idx]) {
+          idx++;
+          showToast(`Wire fix ${idx}/4`);
+          if (idx === sequence.length) {
+            window.removeEventListener('keydown', handler);
+            paused = false;
+            gus.hr = Math.max(MIN_HR, gus.hr - 5);
+            gus.calf = Math.min(100, gus.calf + 15);
+            showToast('Wires fixed! Time bonus.');
+          }
+        }
+      };
+      window.addEventListener('keydown', handler);
+    }
+
+    function formatTime(ms) {
+      const s = Math.floor(ms/1000);
+      const mm = Math.floor(s/60).toString().padStart(2,'0');
+      const ss = (s%60).toString().padStart(2,'0');
+      return `${mm}:${ss}`;
+    }
+
+    function draw() {
+      // Sky layers
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      ctx.clearRect(0,0,w,h);
+      // Mountains
+      drawMountains();
+      // Trail ground
+      const gY = groundY();
+      ctx.fillStyle = '#1b2a33';
+      ctx.fillRect(0, gY, w, h-gY);
+      ctx.strokeStyle = '#2c3f4f';
+      ctx.lineWidth = 2; ctx.setLineDash([12,8]);
+      ctx.beginPath(); ctx.moveTo(0, gY-2); ctx.lineTo(w, gY-2); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Finish banner at 50km
+      const finishX = KM_TARGET * pixelsPerKm - worldOffset - 60;
+      if (finishX < w + 300) drawFinish(finishX, gY);
+
+      // Gus
+      drawGus( gY );
+
+      // Jeffrey marker (as a ghost runner line)
+      const jx = jeff.km * pixelsPerKm - worldOffset;
+      if (jx > -20 && jx < w+20) {
+        ctx.fillStyle = '#f9b24e';
+        ctx.fillRect(jx, gY-70, 4, 70);
+        ctx.font = '12px system-ui';
+        ctx.fillText('Jeffrey', jx - 18, gY-76);
+      }
+
+      // Hazards
+      hazards.forEach(h => {
+        const x = h.x - worldOffset;
+        if (x < -120 || x > w + 120) return;
+        if (h.type === 'rock') { ctx.fillStyle = '#5d6b75'; ctx.fillRect(x, h.y, h.w, h.h); }
+        else if (h.type === 'mud') { ctx.fillStyle = '#5c3a26'; ctx.fillRect(x, h.y, h.w, h.h); }
+        else if (h.type === 'smoothie') { ctx.fillStyle = '#38c172'; ctx.fillRect(x, h.y, h.w, h.h); }
+        else if (h.type === 'wire') { ctx.fillStyle = '#8bbcff'; ctx.fillRect(x, h.y, h.w, h.h); }
+      });
+
+      // Pickups
+      pickups.forEach(p => {
+        const x = p.x - worldOffset;
+        if (x < -120 || x > w + 120) return;
+        if (p.type === 'coffee') { ctx.fillStyle = '#c7a17a'; drawCircle(x+10, p.y+10, 10); }
+        else if (p.type === 'spite') { ctx.fillStyle = '#ff6b6b'; drawDiamond(x+10, p.y+10, 12); }
+      });
+
+      // Low-HR glow around Gus
+    }
+
+    function drawGus(gY) {
+      const x = gus.x, y = gus.y;
+      // Body
+      ctx.fillStyle = '#9fd1ff';
+      ctx.fillRect(x, y, gus.width, gus.height - 20);
+      // Head
+      ctx.fillStyle = '#ffd7a3';
+      drawCircle(x + gus.width/2, y - 10, 10);
+      // Calves (comically large)
+      ctx.fillStyle = '#9fd1ff';
+      drawEllipse(x + 8, y + gus.height - 24, 18, 18);
+      drawEllipse(x + gus.width - 8 - 18, y + gus.height - 24, 18, 18);
+      // Heart-rate pulse ring (shrinks as HR rises)
+      const pulseR = Math.max(4, 14 - (gus.hr - MIN_HR) * 0.08);
+      ctx.strokeStyle = '#9fe6a0';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x + gus.width + 14, y + 10, pulseR, 0, Math.PI*2); ctx.stroke();
+    }
+
+    function drawMountains() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      ctx.fillStyle = '#0f1720';
+      ctx.fillRect(0,0,w,h);
+      // Parallax ridges
+      for (let i=0;i<3;i++) {
+        const offset = (worldOffset * (0.2 + i*0.08)) % (w*2);
+        ctx.fillStyle = i===0? '#12202b' : i===1 ? '#0d1a23' : '#0a141c';
+        ctx.beginPath();
+        ctx.moveTo(-offset, h*0.6 + i*12);
+        for (let x=-offset; x<=w*2; x+=120) {
+          const y = h*0.62 + Math.sin((x+ i*200)*0.005) * (16 + i*10);
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(w*2, h);
+        ctx.lineTo(0, h);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    function drawFinish(x, gY) {
+      ctx.fillStyle = '#c9e7ff';
+      ctx.fillRect(x, gY-120, 8, 120);
+      ctx.fillRect(x+140, gY-120, 8, 120);
+      ctx.fillStyle = '#78c2ff';
+      ctx.fillRect(x+8, gY-120, 132, 28);
+      ctx.fillStyle = '#0a0f14';
+      ctx.font = 'bold 16px system-ui';
+      ctx.fillText('FINISH 50km', x+22, gY-101);
+    }
+
+    function drawCircle(cx, cy, r) { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill(); }
+    function drawEllipse(cx, cy, rx, ry) { ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2); ctx.fill(); }
+    function drawDiamond(cx, cy, s) { ctx.beginPath(); ctx.moveTo(cx, cy-s); ctx.lineTo(cx+s, cy); ctx.lineTo(cx, cy+s); ctx.lineTo(cx-s, cy); ctx.closePath(); ctx.fill(); }
+
+    function loop(ts) {
+      if (!lastTs) lastTs = ts;
+      const dt = Math.min(32, ts - lastTs); // clamp for stability
+      lastTs = ts;
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    reset();
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
